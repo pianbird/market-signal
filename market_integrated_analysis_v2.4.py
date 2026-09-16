@@ -303,7 +303,7 @@ def create_notion_etf_report_page(start_3y, latest_date, daily_market_eval, turn
     for g_key, g_label in group_list:
         group_duals = [d for d in dual_signals if d['group'] == g_key]
         if group_duals:
-            last_d = group_duals[-1]
+            last_d = group_duals[0]
             txt = f"• {g_key} ({g_label})\n  - 최근 동시 시그널일: {last_d['date_str']} ({last_d['signal']})\n"
             for item in last_d['items']:
                 txt += f"    └ {item['name']}: 종가 {item['close']:,}원 | 거래량 {item['vol']:,}\n"
@@ -327,6 +327,7 @@ def create_notion_etf_report_page(start_3y, latest_date, daily_market_eval, turn
         code, name = item['code'], item['name']
         df_sub = df_records[df_records['code'] == code] if not df_records.empty else pd.DataFrame()
         if not df_sub.empty:
+            df_sub = df_sub.sort_values(by='date', ascending=False)
             up_cnt = len(df_sub[df_sub['signal'] == '상승트렌드 +'])
             down_cnt = len(df_sub[df_sub['signal'] == '하락트렌드 +'])
             txt = f"🔹 {name} (총 {len(df_sub)}회 : 상승+ {up_cnt}회 / 하락+ {down_cnt}회)\n"
@@ -635,7 +636,9 @@ def run_analysis():
                     'items': curr['items']
                 })
 
-    turnaround_signals.sort(key=lambda x: x['curr_date'])
+    turnaround_signals.sort(key=lambda x: x['curr_date'], reverse=True)
+    cross_signals.reverse()
+    dual_signals.reverse()
 
     # 당일 시장 장세 종합 판단
     daily_market_eval = evaluate_daily_market(latest_date, cross_signals, analyzed_dfs, TARGET_ETFS)
@@ -696,7 +699,7 @@ def run_analysis():
 
     # 최상단 턴어라운드 배너
     if turnaround_signals:
-        last_t = turnaround_signals[-1]
+        last_t = turnaround_signals[0]
         t_info = f"🔄 [최근 턴어라운드 발생] {last_t['market']} | {last_t['turnaround_type']} (반전일: {last_t['curr_date']} / 직전: {last_t['prev_date']} [{last_t['prev_direction']}])"
         cell = ws_sum.cell(row=curr_banner_row, column=1, value=t_info)
         cell.font = Font(name='맑은 고딕', size=11, bold=True, color='9C6500')
@@ -911,14 +914,14 @@ def run_analysis():
 
     msg_etf += "\n🔥 <b>[KOSPI/KOSDAQ 교차 신호]</b>\n"
     if cross_signals:
-        recent_cross = cross_signals[-1] if cross_signals else None
+        recent_cross = cross_signals[0] if cross_signals else None
         msg_etf += f"• <b>{len(cross_signals)}건</b> 포착 (최근: {recent_cross['market']} {recent_cross['direction']})\n"
     else:
         msg_etf += "• 신호 없음\n"
 
     msg_etf += "\n⚡ <b>[그룹별 동시 신호 (Dual Signal)]</b>\n"
     if dual_signals:
-        recent_dual = dual_signals[-1] if dual_signals else None
+        recent_dual = dual_signals[0] if dual_signals else None
         msg_etf += f"• 총 <b>{len(dual_signals)}건</b> 포착 (최근: {recent_dual['group']} {recent_dual['signal']})\n"
     else:
         msg_etf += "• 신호 없음\n"
