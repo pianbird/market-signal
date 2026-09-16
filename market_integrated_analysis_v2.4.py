@@ -355,16 +355,17 @@ def create_notion_etf_report_page(start_3y, latest_date, daily_market_eval, turn
         res = requests.post(url, json=payload, headers=NOTION_HEADERS, timeout=15)
         if res.status_code in [200, 201]:
             page_id = res.json().get("id")
+            page_url = res.json().get("url")
             if remaining_blocks and page_id:
                 append_notion_blocks(page_id, remaining_blocks)
             print(f"  └ ✅ [노션 데이터베이스] ETF 트렌드 시그널 보고서 페이지 등록 완료 (ID: {page_id})")
-            return True
+            return page_url
         else:
             print(f"  └ ❌ 노션 등록 실패: Status {res.status_code}, Body: {res.text}")
-            return False
+            return None
     except Exception as e:
         print(f"  └ ❌ 노션 API 요청 중 예외 발생: {e}")
-        return False
+        return None
 
 # 분석 대상 8대 ETF 정의
 TARGET_ETFS = [
@@ -881,7 +882,10 @@ def run_analysis():
     except Exception as e:
         print(f"\n❌ 엑셀 파일 저장 중 오류 발생: {e}")
 
-    # 6. 텔레그램 브리핑 메시지 작성 및 전송 (요점만 간단히)
+    # 6. 노션 데이터베이스 리포트 페이지 등록 (텔레그램에 링크 포함을 위해 먼저 실행)
+    notion_url = create_notion_etf_report_page(start_3y, latest_date, daily_market_eval, turnaround_signals, cross_signals, dual_signals, df_records, TARGET_ETFS)
+
+    # 7. 텔레그램 브리핑 메시지 작성 및 전송 (요점만 간단히)
     current_time_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     
     # (6-1) 시장 장세 종합 요약 메시지
@@ -919,7 +923,10 @@ def run_analysis():
     else:
         msg_etf += "• 신호 없음\n"
 
-    msg_etf += "\n💡 <i>※ 상세 내역(3년 분석, 종목별 시그널)은 노션 리포트 및 엑셀을 확인하세요.</i>"
+    if notion_url:
+        msg_etf += f"\n💡 <i>※ 상세 내역(3년 분석, 종목별 시그널)은 <a href='{notion_url}'>노션 리포트</a> 및 엑셀을 확인하세요.</i>"
+    else:
+        msg_etf += "\n💡 <i>※ 상세 내역(3년 분석, 종목별 시그널)은 노션 리포트 및 엑셀을 확인하세요.</i>"
 
     print("\n[텔레그램 브리핑 메시지 1: 최근 5영업일 시장 장세 종합 판단]")
     print(msg_market)
@@ -935,9 +942,6 @@ def run_analysis():
         print("\n✅ 텔레그램 메시지 2건이 성공적으로 전송되었습니다.")
     else:
         print(f"\n⚠️ 텔레그램 전송 결과 - 메시지1(장세판단): {'성공' if success1 else '실패'}, 메시지2(ETF분석): {'성공' if success2 else '실패'}")
-
-    # 7. 노션 데이터베이스 리포트 페이지 등록
-    create_notion_etf_report_page(start_3y, latest_date, daily_market_eval, turnaround_signals, cross_signals, dual_signals, df_records, TARGET_ETFS)
 
 if __name__ == '__main__':
     run_analysis()
