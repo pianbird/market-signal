@@ -881,87 +881,45 @@ def run_analysis():
     except Exception as e:
         print(f"\n❌ 엑셀 파일 저장 중 오류 발생: {e}")
 
-    # 6. 텔레그램 브리핑 메시지 작성 및 전송 (장세 종합 판단과 ETF 시그널 보고서 분리 전송)
-    # (6-1) 최근 5영업일 시장 장세 종합 판단 메시지 (독립 메시지)
-    msg_market = "📌 <b>[최근 5영업일 시장 장세 종합 판단]</b>\n"
+    # 6. 텔레그램 브리핑 메시지 작성 및 전송 (요점만 간단히)
+    current_time_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    
+    # (6-1) 시장 장세 종합 요약 메시지
+    msg_market = f"📌 <b>[오늘의 시장 장세 요약]</b> ({current_time_str})\n"
     for day in daily_market_eval:
         d_str = day['date_str']
-        is_today = (d_str == latest_date.strftime('%Y-%m-%d'))
-        if is_today:
-            msg_market += f"• <b>{d_str} (당일)</b>\n"
+        if d_str == latest_date.strftime('%Y-%m-%d'):
+            msg_market += f"• <b>{d_str} (최근 영업일)</b>\n"
             for mkt, data in day['markets'].items():
                 msg_market += f"  - <b>{mkt}</b>: {data['status']}\n"
-                msg_market += f"    └ {', '.join(data['details'])}\n"
-        else:
-            k_st = day['markets']['KOSPI']['status']
-            q_st = day['markets']['KOSDAQ']['status']
-            msg_market += f"• <b>{d_str}</b> | KOSPI: {k_st} | KOSDAQ: {q_st}\n"
 
-    # (6-2) 8대 ETF 최근 3년 트렌드(+) 시그널 분석 보고서 메시지
-    msg_etf = "<b>🤖 [8대 ETF 최근 3년 트렌드(+) 시그널 분석 보고서]</b>\n"
-    msg_etf += f"📅 <b>분석 기간</b>: {start_3y.strftime('%Y-%m-%d')} ~ {latest_date.strftime('%Y-%m-%d')}\n"
+    # (6-2) 8대 ETF 트렌드 시그널 요약 메시지
+    msg_etf = f"🤖 <b>[ETF 트렌드 포착 요약]</b> ({current_time_str})\n"
+    msg_etf += f"📅 <b>기준일</b>: {latest_date.strftime('%Y-%m-%d')}\n"
     msg_etf += "━━━━━━━━━━━━━━━━━━━━━\n"
-
-    # (1) 최상단: 턴어라운드 (Turnaround) 포착 신호
-    msg_etf += "\n🔄 <b>[최근 시장 턴어라운드 (Turnaround) 포착]</b>\n"
+    
+    msg_etf += "🔄 <b>[시장 턴어라운드 신호]</b>\n"
     if turnaround_signals:
-        msg_etf += f"총 <b>{len(turnaround_signals)}회</b> 반전 포착 (최근 발생 순):\n"
-        for t in turnaround_signals:
-            msg_etf += f"• <b>{t['market']}</b> | <b>{t['turnaround_type']}</b>\n"
-            msg_etf += f"  - 반전일자: <b>{t['curr_date']}</b> (직전 {t['prev_date']} [{t['prev_direction']}])\n"
-            for item in t['items']:
-                msg_etf += f"    └ {item['name']}: <b>{item['signal']}</b> (종가 {item['close']:,}원)\n"
+        recent_turn = turnaround_signals[0] if turnaround_signals else None
+        msg_etf += f"• <b>{len(turnaround_signals)}건</b> 포착 (최근: {recent_turn['market']} {recent_turn['turnaround_type']})\n"
     else:
-        msg_etf += "• 최근 3년 내 시장 턴어라운드 신호 없음\n"
+        msg_etf += "• 신호 없음\n"
 
-    msg_etf += "\n━━━━━━━━━━━━━━━━━━━━━\n"
-    # (2) KOSPI / KOSDAQ 4대 ETF 교차 포착 시그널 (가장 강력)
-    msg_etf += "🔥 <b>[KOSPI / KOSDAQ 4대 ETF 교차 포착 시그널 (가장 강력)]</b>\n"
+    msg_etf += "\n🔥 <b>[KOSPI/KOSDAQ 교차 신호]</b>\n"
     if cross_signals:
-        msg_etf += f"총 <b>{len(cross_signals)}회</b> 발생 (최근 발생일 순):\n"
-        for cs in cross_signals[-5:]:
-            msg_etf += f"• <b>{cs['market']} ({cs['date_str']})</b> | <b>{cs['direction']}</b>\n"
-            for item in cs['items']:
-                msg_etf += f"  └ {item['name']}: <b>{item['signal']}</b> (종가 {item['close']:,}원)\n"
+        recent_cross = cross_signals[-1] if cross_signals else None
+        msg_etf += f"• <b>{len(cross_signals)}건</b> 포착 (최근: {recent_cross['market']} {recent_cross['direction']})\n"
     else:
-        msg_etf += "• 최근 3년 내 시장 4대 ETF 교차 포착 시그널 없음\n"
+        msg_etf += "• 신호 없음\n"
 
-    msg_etf += "\n⚡ <b>[그룹별 최근 동시 포착 시그널 (Dual Signal)]</b>\n"
-    group_list = [
-        ('KOSPI 200', 'KODEX 200 & TIGER 200'),
-        ('KOSPI 200 인버스', 'KODEX 인버스 & TIGER 인버스'),
-        ('KOSDAQ 150', 'KODEX 코스닥150 & TIGER 코스닥150'),
-        ('KOSDAQ 150 인버스', 'KODEX 코스닥150선물인버스 & TIGER 코스닥150선물인버스')
-    ]
+    msg_etf += "\n⚡ <b>[그룹별 동시 신호 (Dual Signal)]</b>\n"
+    if dual_signals:
+        recent_dual = dual_signals[-1] if dual_signals else None
+        msg_etf += f"• 총 <b>{len(dual_signals)}건</b> 포착 (최근: {recent_dual['group']} {recent_dual['signal']})\n"
+    else:
+        msg_etf += "• 신호 없음\n"
 
-    for g_key, g_label in group_list:
-        group_duals = [d for d in dual_signals if d['group'] == g_key]
-        if group_duals:
-            last_d = group_duals[-1]
-            msg_etf += f"• <b>{g_key} ({g_label})</b>\n"
-            msg_etf += f"  - 최근 동시 시그널일: <b>{last_d['date_str']}</b> ({last_d['signal']})\n"
-            for item in last_d['items']:
-                msg_etf += f"    └ {item['name']}: 종가 {item['close']:,}원 | 거래량 {item['vol']:,}\n"
-        else:
-            msg_etf += f"• <b>{g_key} ({g_label})</b>: 최근 3년 내 동시 포착 시그널 없음\n"
-
-    msg_etf += "\n━━━━━━━━━━━━━━━━━━━━━\n"
-    msg_etf += "📊 <b>[최근 3년 종목별 (+) 시그널 요약 및 최근 발생]</b>\n"
-    for item in TARGET_ETFS:
-        code, name = item['code'], item['name']
-        df_sub = df_records[df_records['code'] == code] if not df_records.empty else pd.DataFrame()
-        if not df_sub.empty:
-            up_cnt = len(df_sub[df_sub['signal'] == '상승트렌드 +'])
-            down_cnt = len(df_sub[df_sub['signal'] == '하락트렌드 +'])
-            msg_etf += f"\n🔹 <b>{name}</b> (총 {len(df_sub)}회 : 상승+ {up_cnt}회 / 하락+ {down_cnt}회)\n"
-            # 최근 3개 시그널만 표시하여 메시지 길이 초과 방지
-            recent_sub = df_sub.tail(3)
-            for _, r in recent_sub.iterrows():
-                msg_etf += f"  • {r['date_str']} | <b>{r['signal']}</b> | 종가 {r['close']:,}원\n"
-        else:
-            msg_etf += f"\n🔹 <b>{name}</b>: 시그널 없음\n"
-
-    msg_etf += "\n💡 <i>※ 전체 3년 시그널 상세 내역은 생성된 엑셀 보고서(ETF_8종_최근3년_트렌드시그널_분석.xlsx)를 참고하세요.</i>"
+    msg_etf += "\n💡 <i>※ 상세 내역(3년 분석, 종목별 시그널)은 노션 리포트 및 엑셀을 확인하세요.</i>"
 
     print("\n[텔레그램 브리핑 메시지 1: 최근 5영업일 시장 장세 종합 판단]")
     print(msg_market)
