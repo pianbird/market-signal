@@ -2,13 +2,19 @@ name: Market analysis
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "30 23 * * 0-4" # KST Monday-Friday 08:30 (UTC Sunday-Thursday 23:30)
+
+concurrency:
+  group: market-analysis
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
   analyze:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       TZ: Asia/Seoul
@@ -18,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -33,7 +39,7 @@ jobs:
         run: python market_integrated_analysis_v2.5.py
       - name: Upload Excel report
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: market-analysis-${{ github.run_id }}-${{ github.run_attempt }}
           path: output/*.xlsx
