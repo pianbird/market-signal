@@ -5,7 +5,7 @@ on:
   schedule:
     - cron: "30 2 * * 1-5" # KST Monday-Friday 11:30
     - cron: "30 5 * * 1-5" # KST Monday-Friday 14:30
-    - cron: "20 7 * * 1-5" # KST Monday-Friday 16:20
+    - cron: "30 7 * * 1-5" # KST Monday-Friday 16:30
 
 concurrency:
   group: market-analysis
