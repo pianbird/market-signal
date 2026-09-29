@@ -3,12 +3,9 @@ name: Market analysis
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 12 * * 1-5"
-      timezone: "Asia/Seoul"
-    - cron: "0 15 * * 1-5"
-      timezone: "Asia/Seoul"
-    - cron: "0 16 * * 1-5"
-      timezone: "Asia/Seoul"
+    - cron: "30 2 * * 1-5" # KST Monday-Friday 11:30
+    - cron: "30 5 * * 1-5" # KST Monday-Friday 14:30
+    - cron: "20 7 * * 1-5" # KST Monday-Friday 16:20
 
 concurrency:
   group: market-analysis
