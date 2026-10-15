@@ -34,6 +34,10 @@ NOTION_API_KEY = os.environ.get("NOTION_API_KEY", "")
 NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "")
 NOTION_VERSION = "2022-06-28"
 
+# 분석 기간 및 시세 수집 설정 (환경변수 연동)
+ANALYSIS_YEARS = int(os.environ.get("ANALYSIS_YEARS", "10"))
+FETCH_COUNT = ANALYSIS_YEARS * 250 + 100
+
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_API_KEY}",
     "Content-Type": "application/json",
@@ -85,8 +89,32 @@ def append_notion_blocks(page_id, blocks):
         payload = {"children": chunk}
         try:
             requests.patch(url, json=payload, headers=NOTION_HEADERS, timeout=15)
+            time.sleep(0.35)
         except Exception:
             pass
+
+def split_lines_to_notion_paragraphs(header_line, lines, max_chars=1800):
+    """노션 블록 2,000자 제한으로 인한 중간 잘림을 방지하기 위해 줄 단위로 안전하게 분할"""
+    blocks = []
+    current_text = header_line + "\n"
+    for line in lines:
+        if len(current_text) + len(line) + 1 > max_chars:
+            blocks.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": current_text.rstrip()}}]}
+            })
+            current_text = f"{header_line} (계속)\n{line}\n"
+        else:
+            current_text += line + "\n"
+
+    if current_text.strip():
+        blocks.append({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [{"type": "text", "text": {"content": current_text.rstrip()}}]}
+        })
+    return blocks
 
 def evaluate_daily_market(latest_date, cross_signals, analyzed_dfs, target_etfs, days=5):
     """최근 n거래일(기본 5영업일) 기준 KOSPI 및 KOSDAQ 장세를 각각 종합 분석하여 리스트 형태로 반환"""
@@ -198,7 +226,7 @@ def create_notion_etf_report_page(start_3y, latest_date, daily_market_eval, turn
 
     properties = {
         title_col_name: {
-            "title": [{"text": {"content": f"8대 ETF 최근 3년 트렌드(+) 시그널 분석 보고서 ({now_str})"}}]
+            "title": [{"text": {"content": f"8대 ETF 최근 {ANALYSIS_YEARS}년 트렌드(+) 시그널 분석 보고서 ({now_str})"}}]
         },
         "날짜": {"date": {"start": now_iso}},
         "시장구분": {"select": {"name": "ETF 트렌드 시그널"}},
@@ -209,7 +237,7 @@ def create_notion_etf_report_page(start_3y, latest_date, daily_market_eval, turn
     blocks = []
     
     # 1. 요약 Callout 블록
-    summary_txt = f"🤖 [8대 ETF 최근 3년 트렌드(+) 시그널 분석 보고서]\n📅 분석 기간: {start_3y.strftime('%Y-%m-%d')} ~ {latest_date.strftime('%Y-%m-%d')}\n등록시간: {now_str}"
+    summary_txt = f"🤖 [8대 ETF 최근 {ANALYSIS_YEARS}년 트렌드(+) 시그널 분석 보고서]\n📅 분석 기간: {start_3y.strftime('%Y-%m-%d')} ~ {latest_date.strftime('%Y-%m-%d')}\n등록시간: {now_str}"
     blocks.append({
         "object": "block",
         "type": "callout",
@@ -258,7 +286,7 @@ def create_notion_etf_report_page(start_3y, latest_date, daily_market_eval, turn
         blocks.append({
             "object": "block",
             "type": "bulleted_list_item",
-            "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "• 최근 3년 내 시장 턴어라운드 신호 없음"}}]}
+            "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"• 최근 {ANALYSIS_YEARS}년 내 시장 턴어라운드 신호 없음"}}]}
         })
 
     # 3. KOSPI / KOSDAQ 시장별 4대 ETF 교차 포착 시그널 (가장 강력한 신호)
@@ -283,7 +311,7 @@ def create_notion_etf_report_page(start_3y, latest_date, daily_market_eval, turn
         blocks.append({
             "object": "block",
             "type": "bulleted_list_item",
-            "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "• 최근 3년 내 시장 4대 ETF 교차 포착 시그널 없음"}}]}
+            "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"• 최근 {ANALYSIS_YEARS}년 내 시장 4대 ETF 교차 포착 시그널 없음"}}]}
         })
 
     # 3. 그룹별 동시 포착 시그널 블록
@@ -308,7 +336,7 @@ def create_notion_etf_report_page(start_3y, latest_date, daily_market_eval, turn
             for item in last_d['items']:
                 txt += f"    └ {item['name']}: 종가 {item['close']:,}원 | 거래량 {item['vol']:,}\n"
         else:
-            txt = f"• {g_key} ({g_label}): 최근 3년 내 동시 포착 시그널 없음"
+            txt = f"• {g_key} ({g_label}): 최근 {ANALYSIS_YEARS}년 내 동시 포착 시그널 없음"
         
         blocks.append({
             "object": "block",
@@ -316,11 +344,11 @@ def create_notion_etf_report_page(start_3y, latest_date, daily_market_eval, turn
             "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": txt[:1900]}}]}
         })
 
-    # 4. 종목별 3년 시그널 현황
+    # 4. 종목별 시그널 현황
     blocks.append({
         "object": "block",
         "type": "heading_2",
-        "heading_2": {"rich_text": [{"type": "text", "text": {"content": "📊 최근 3년 종목별 (+) 시그널 현황"}}]}
+        "heading_2": {"rich_text": [{"type": "text", "text": {"content": f"📊 최근 {ANALYSIS_YEARS}년 종목별 (+) 시그널 현황"}}]}
     })
 
     for item in target_etfs:
@@ -330,17 +358,18 @@ def create_notion_etf_report_page(start_3y, latest_date, daily_market_eval, turn
             df_sub = df_sub.sort_values(by='date', ascending=False)
             up_cnt = len(df_sub[df_sub['signal'] == '상승트렌드 +'])
             down_cnt = len(df_sub[df_sub['signal'] == '하락트렌드 +'])
-            txt = f"🔹 {name} (총 {len(df_sub)}회 : 상승+ {up_cnt}회 / 하락+ {down_cnt}회)\n"
-            for _, r in df_sub.iterrows():
-                txt += f"  • {r['date_str']} | {r['signal']} | 종가 {r['close']:,}원\n"
+            header_line = f"🔹 {name} (총 {len(df_sub)}회 : 상승+ {up_cnt}회 / 하락+ {down_cnt}회)"
+            lines = [
+                f"  • {r['date_str']} | {r['signal']} | 종가 {r['close']:,}원"
+                for _, r in df_sub.iterrows()
+            ]
+            blocks.extend(split_lines_to_notion_paragraphs(header_line, lines, max_chars=1800))
         else:
-            txt = f"🔹 {name}: 시그널 없음"
-            
-        blocks.append({
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {"rich_text": [{"type": "text", "text": {"content": txt[:1900]}}]}
-        })
+            blocks.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"🔹 {name}: 최근 {ANALYSIS_YEARS}년 내 시그널 없음"}}]}
+            })
 
     url = "https://api.notion.com/v1/pages"
     first_chunk = blocks[:90]
@@ -380,7 +409,7 @@ TARGET_ETFS = [
     {'code': '250780', 'name': 'TIGER 코스닥150선물인버스', 'group': 'KOSDAQ 150 인버스', 'market': 'KOSDAQ', 'type': '인버스'}
 ]
 
-def fetch_historical_ohlcv(code, count=1200):
+def fetch_historical_ohlcv(code, count=FETCH_COUNT):
     """네이버 차트 XML API를 이용하여 일별 시세 수집 및 40EMA 연산"""
     url_fchart = f"https://fchart.stock.naver.com/sise.nhn?symbol={code}&timeframe=day&count={count}&requestType=0"
     res = requests.get(url_fchart, headers=HEADERS, timeout=10)
@@ -528,7 +557,7 @@ def send_telegram_message(bot_token, chat_id, text):
 
 def run_analysis():
     print("=" * 60)
-    print("8대 ETF 최근 3년 상승트랜드(+), 하락트랜드(+) 시그널 분석 시작")
+    print(f"8대 ETF 최근 {ANALYSIS_YEARS}년 상승트랜드(+), 하락트랜드(+) 시그널 분석 시작")
     print("=" * 60)
 
     # 1. 8개 ETF 시세 데이터 수집 및 시그널 계산
@@ -536,7 +565,7 @@ def run_analysis():
     for item in TARGET_ETFS:
         code, name, group = item['code'], item['name'], item['group']
         print(f"[{name} ({code})] 시세 수집 및 시그널 계산 중...")
-        df = fetch_historical_ohlcv(code, count=1200)
+        df = fetch_historical_ohlcv(code, count=FETCH_COUNT)
         if df is not None:
             df_sig = calculate_all_signals(df)
             analyzed_dfs[code] = df_sig
@@ -546,14 +575,14 @@ def run_analysis():
     if not analyzed_dfs:
         raise RuntimeError("분석할 수 있는 데이터가 없습니다.")
 
-    # 2. 최근 3년 기간 설정 (가장 최근 일자 기준 1년)
+    # 2. 최근 N년 기간 설정
     ref_df = list(analyzed_dfs.values())[0]
     latest_date = ref_df['날짜'].max()
-    start_3y = latest_date - pd.DateOffset(years=3)
+    start_3y = latest_date - pd.DateOffset(years=ANALYSIS_YEARS)
 
-    print(f"\n📅 최근 3년 분석 기간: {start_3y.strftime('%Y-%m-%d')} ~ {latest_date.strftime('%Y-%m-%d')}")
+    print(f"\n📅 최근 {ANALYSIS_YEARS}년 분석 기간: {start_3y.strftime('%Y-%m-%d')} ~ {latest_date.strftime('%Y-%m-%d')}")
 
-    # 3. 최근 3년 내 (+) 시그널 레코드 수집
+    # 3. 최근 N년 내 (+) 시그널 레코드 수집
     records = []
     for item in TARGET_ETFS:
         code, name, group = item['code'], item['name'], item['group']
@@ -649,7 +678,7 @@ def run_analysis():
     # Actions에서는 OUTPUT_DIR, Colab에서는 /content, 로컬에서는 현재 작업 폴더 사용
     output_dir = os.environ.get("OUTPUT_DIR") or ("/content" if os.path.isdir("/content") else os.getcwd())
     os.makedirs(output_dir, exist_ok=True)
-    excel_path = os.path.join(output_dir, "ETF_8종_최근3년_트렌드시그널_분석.xlsx")
+    excel_path = os.path.join(output_dir, f"ETF_8종_최근{ANALYSIS_YEARS}년_트렌드시그널_분석.xlsx")
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
@@ -676,9 +705,9 @@ def run_analysis():
     align_left = Alignment(horizontal='left', vertical='center')
 
     # [시트 1: 요약]
-    ws_sum = wb.create_sheet(title="최근3년 요약")
+    ws_sum = wb.create_sheet(title=f"최근{ANALYSIS_YEARS}년 요약")
     ws_sum.views.sheetView[0].showGridLines = True
-    ws_sum['A1'] = "8대 ETF 최근 3년 트렌드(+) 시그널 분석 요약"
+    ws_sum['A1'] = f"8대 ETF 최근 {ANALYSIS_YEARS}년 트렌드(+) 시그널 분석 요약"
     ws_sum['A1'].font = font_title
     ws_sum['A2'] = f"분석 기간: {start_3y.strftime('%Y-%m-%d')} ~ {latest_date.strftime('%Y-%m-%d')}"
     ws_sum['A2'].font = font_sub
@@ -745,7 +774,7 @@ def run_analysis():
     # [시트 2: 가장 강력한 동시 시그널 모음]
     ws_dual = wb.create_sheet(title="가장 강력한 동시 시그널")
     ws_dual.views.sheetView[0].showGridLines = True
-    ws_dual['A1'] = "🔄 [최신 턴어라운드] & 🔥 KOSPI / KOSDAQ 4대 ETF 교차 동시 발생일 목록 (최근 3년)"
+    ws_dual['A1'] = f"🔄 [최신 턴어라운드] & 🔥 KOSPI / KOSDAQ 4대 ETF 교차 동시 발생일 목록 (최근 {ANALYSIS_YEARS}년)"
     ws_dual['A1'].font = font_title
 
     dual_headers = ["시그널 구분", "발생일자", "시장/방향", "동시 포착 종목", "종가", "당일 거래량", "40EMA 거래량", "비고"]
@@ -820,15 +849,15 @@ def run_analysis():
                     cell.font = font_up_plus if d['signal'] == '상승트렌드 +' else font_down_plus
             curr_row += 1
 
-    # [시트 3~10: ETF별 3년 상세 시트]
+    # [시트 3~10: ETF별 N년 상세 시트]
     for item in TARGET_ETFS:
         code, name, group = item['code'], item['name'], item['group']
         df = analyzed_dfs[code]
         df_3y = df[(df['날짜'] >= start_3y) & (df['날짜'] <= latest_date)].sort_values(by='날짜', ascending=False).reset_index(drop=True)
 
-        ws = wb.create_sheet(title=f"{name} 3년상세")
+        ws = wb.create_sheet(title=f"{name} {ANALYSIS_YEARS}년상세")
         ws.views.sheetView[0].showGridLines = True
-        ws['A1'] = f"{name} ({code}) 최근 3년 시그널 분석 상세"
+        ws['A1'] = f"{name} ({code}) 최근 {ANALYSIS_YEARS}년 시그널 분석 상세"
         ws['A1'].font = font_title
 
         detail_headers = ["날짜", "종가", "시가", "고가", "저가", "거래량", "40EMA 종가", "40EMA 거래량", "트렌드(+) 시그널"]
@@ -884,7 +913,7 @@ def run_analysis():
         wb.save(excel_path)
         print(f"\n✅ 엑셀 파일 저장 완료: {excel_path}")
     except PermissionError:
-        alt_excel_path = os.path.join(output_dir, f"ETF_8종_최근3년_트렌드시그널_분석_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        alt_excel_path = os.path.join(output_dir, f"ETF_8종_최근{ANALYSIS_YEARS}년_트렌드시그널_분석_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
         wb.save(alt_excel_path)
         print(f"\n⚠️ 기존 엑셀 파일이 사용 중이어서 새 파일명으로 저장 완료: {alt_excel_path}")
     except Exception as e:
@@ -933,13 +962,13 @@ def run_analysis():
         msg_etf += "• 신호 없음\n"
 
     if notion_url:
-        msg_etf += f"\n💡 <i>※ 상세 내역(3년 분석, 종목별 시그널)은 <a href='{notion_url}'>노션 리포트</a> 및 엑셀을 확인하세요.</i>"
+        msg_etf += f"\n💡 <i>※ 상세 내역({ANALYSIS_YEARS}년 분석, 종목별 시그널)은 <a href='{notion_url}'>노션 리포트</a> 및 엑셀을 확인하세요.</i>"
     else:
-        msg_etf += "\n💡 <i>※ 상세 내역(3년 분석, 종목별 시그널)은 노션 리포트 및 엑셀을 확인하세요.</i>"
+        msg_etf += f"\n💡 <i>※ 상세 내역({ANALYSIS_YEARS}년 분석, 종목별 시그널)은 노션 리포트 및 엑셀을 확인하세요.</i>"
 
     print("\n[텔레그램 브리핑 메시지 1: 최근 5영업일 시장 장세 종합 판단]")
     print(msg_market)
-    print("\n[텔레그램 브리핑 메시지 2: 8대 ETF 최근 3년 트렌드(+) 시그널 분석 보고서]")
+    print(f"\n[텔레그램 브리핑 메시지 2: 8대 ETF 최근 {ANALYSIS_YEARS}년 트렌드(+) 시그널 분석 보고서]")
     print(msg_etf)
 
     # 텔레그램 전송 (2개 메시지 분리 전송)
