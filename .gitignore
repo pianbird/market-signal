@@ -3,3 +3,8 @@ __pycache__/
 .env
 .venv/
 venv/
+
+build/
+dist/
+*.spec
+diff.txt
