@@ -78,8 +78,90 @@ TARGET_ETFS = [
 
 
 # ==============================================================================
-# 2. 공통 유틸리티 (거래량 보정, 텔레그램, Git 백업, 노션 API)
+# 2. 공통 유틸리티 (개장일 판별 가드, 거래량 보정, 텔레그램, Git 백업, 노션 API)
 # ==============================================================================
+def is_market_open_today(mode: str = "closing") -> bool:
+    """
+    한국 증시 개장일(영업일) 판별 가드
+    1. 주말 1차 차단: 토요일/일요일인 경우 즉시 False 반환.
+    2. 실시간 네이버 차트 일봉 및 지수 API 검증:
+       - 대표 ETF(069500 KODEX 200) 일봉 API 호출
+         - 장마감 모드 ('closing'): 15:30 이후 실행되었으나 오늘 날짜 봉 데이터가 없으면 휴장일로 판정 (False)
+         - 장 시작 전 / 장중 모드 ('daemon', 'intraday'): 네이버 실시간 국내 지수(KOSPI) API의 marketStatus 및 최신 거래일자를 교차 점검하여 휴장일인 경우 False 반환
+    3. 통신 에러 등 예외 발생 시 기본값 True 유지 (경고 로그 출력)
+    """
+    now = datetime.datetime.now()
+
+    # 1. 주말 1차 차단 (토=5, 일=6)
+    if now.weekday() >= 5:
+        return False
+
+    today_ymd = now.strftime("%Y%m%d")
+    today_dash = now.strftime("%Y-%m-%d")
+
+    try:
+        # 대표 ETF (069500) 일봉 API 확인
+        fchart_url = "https://fchart.stock.naver.com/sise.nhn?symbol=069500&timeframe=day&count=1&requestType=0"
+        res_fchart = requests.get(fchart_url, headers=HEADERS, timeout=5)
+        has_today_candle = False
+        latest_candle_date = ""
+
+        if res_fchart.status_code == 200:
+            root = ET.fromstring(res_fchart.text)
+            item = root.find(".//item")
+            if item is not None:
+                data_attr = item.get("data", "")
+                if data_attr:
+                    latest_candle_date = data_attr.split("|")[0].strip()
+                    if latest_candle_date == today_ymd:
+                        has_today_candle = True
+
+        # 오늘자 일봉이 이미 생성되어 있다면 확실히 개장일
+        if has_today_candle:
+            return True
+
+        market_open_time = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        market_close_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
+
+        # 장마감 모드 ('closing'): 15:30 이후 실행되었으나 오늘 날짜의 봉 데이터가 없으면 휴장일
+        if mode == "closing":
+            if now >= market_close_time and not has_today_candle:
+                return False
+
+        # 장 시작 전 / 장중 모드 ('daemon', 'intraday') 또는 15:30 이전 closing
+        # 네이버 실시간 국내 지수 API의 marketStatus 및 최신 거래일자 교차 점검
+        kospi_url = "https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI"
+        res_kospi = requests.get(kospi_url, headers=HEADERS, timeout=5)
+        if res_kospi.status_code == 200:
+            datas = res_kospi.json().get("datas", [])
+            if datas:
+                d0 = datas[0]
+                market_status = str(d0.get("marketStatus", "")).upper()
+                local_traded_at = str(d0.get("localTradedAt", ""))
+                trade_date = local_traded_at.split("T")[0] if "T" in local_traded_at else ""
+
+                if market_open_time <= now <= market_close_time:
+                    # 장중인데 marketStatus가 OPEN이 아니고 최신 거래일자도 오늘이 아니면 휴장일
+                    if market_status != "OPEN" and trade_date != today_dash:
+                        return False
+                    return True
+                elif now > market_close_time:
+                    # 장마감 이후인데 봉 데이터도 없고 거래일자도 오늘이 아니면 휴장일
+                    if trade_date != today_dash and not has_today_candle:
+                        return False
+                    return True
+                else:
+                    # 장 시작 전 (09:00 이전):
+                    # 장전 상태에서는 기본 True 반환 (정규장 진입 후 스케줄러/장중 모드에서 2차 검증)
+                    return True
+
+        return True
+
+    except Exception as e:
+        print(f"⚠️ [증시 개장일 판별 경고] 네이버 시세 API 확인 중 오류 발생 (기본값 True 유지): {e}")
+        return True
+
+
 def get_intraday_volume_multiplier(now_dt: Optional[datetime.datetime] = None) -> float:
     """
     정규장(09:00~15:30, 총 390분) 경과 시간에 따른 거래량 보정 배수 계산
@@ -1354,10 +1436,14 @@ def run_daemon_mode() -> None:
             if now_dt.weekday() < 5 and hhmm_str in SCHEDULE_TIMES:
                 sent_today = sent_history.setdefault(today_str, [])
                 if hhmm_str not in sent_today:
-                    print(f"\n⏰ [{today_str} {hhmm_str}] 정기 장중 분석 리포트 자동 발송 중...")
-                    report_txt = build_intraday_report(trigger_label=f"{hhmm_str} 정기 브리핑")
-                    send_telegram_message(report_txt)
-                    sent_today.append(hhmm_str)
+                    if not is_market_open_today(mode="intraday"):
+                        print(f"\nℹ️ [{today_str} {hhmm_str}] 휴장일 감지: 정기 브리핑을 건너뜁니다.")
+                        sent_today.append(hhmm_str)
+                    else:
+                        print(f"\n⏰ [{today_str} {hhmm_str}] 정기 장중 분석 리포트 자동 발송 중...")
+                        report_txt = build_intraday_report(trigger_label=f"{hhmm_str} 정기 브리핑")
+                        send_telegram_message(report_txt)
+                        sent_today.append(hhmm_str)
 
             # 2. 텔레그램 실시간 인터랙션 Long Polling
             if MY_BOT_TOKEN and MY_CHAT_ID:
@@ -1382,16 +1468,26 @@ def run_daemon_mode() -> None:
                         print(f"📩 [명령어 수신] {now_dt.strftime('%H:%M:%S')} -> {text}")
 
                         if cmd in ("/분석", "분석", "/report", "/시황"):
-                            reply = build_intraday_report(trigger_label="실시간 /분석 요청")
+                            if not is_market_open_today(mode="intraday"):
+                                notice = f"ℹ️ <b>[휴장일 안내]</b> 오늘({today_str})은 주식시장 휴장일입니다.\n(최근 거래일 종가 기준으로 분석을 제공합니다.)\n\n"
+                                reply = notice + build_intraday_report(trigger_label="실시간 /분석 요청 (휴장일)")
+                            else:
+                                reply = build_intraday_report(trigger_label="실시간 /분석 요청")
                             send_telegram_message(reply, chat_id)
                         elif cmd in ("/포지션", "포지션", "/잔고", "/status"):
                             reply = build_position_status_report()
+                            if not is_market_open_today(mode="intraday"):
+                                reply = f"ℹ️ <i>[휴장일 안내] 오늘({today_str})은 주식시장 휴장일입니다. (최근 영업일 종가 기준)</i>\n\n" + reply
                             send_telegram_message(reply, chat_id)
                         elif cmd in ("/상태", "/도움말", "/help", "/start"):
+                            is_open = is_market_open_today(mode="intraday")
+                            market_desc = "🟢 개장일 (정상 운영 중)" if is_open else "🔴 휴장일 (브리핑 스킵 / 명령어 유연 응대)"
+                            holiday_notice = "" if is_open else f"\n⚠️ <b>안내:</b> 오늘({today_str})은 주식시장 휴장일입니다."
                             sent_list = ", ".join(sent_history.get(today_str, [])) or "없음"
                             help_txt = (
                                 "🤖 <b>[통합 마켓시그널 봇 상태 안내]</b>\n"
                                 f"• <b>현재 서버 시각:</b> {now_dt.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                f"• <b>금일 증시 상태:</b> {market_desc}{holiday_notice}\n"
                                 f"• <b>평일 자동 브리핑:</b> {', '.join(SCHEDULE_TIMES)}\n"
                                 f"• <b>금일 발송 완료:</b> {sent_list}\n\n"
                                 "💡 <b>[사용 가능한 명령어]</b>\n"
@@ -1421,6 +1517,21 @@ if __name__ == "__main__":
     parser.add_argument("--daemon", action="store_true", help="장중 정기 브리핑 및 텔레그램 명령어 응답 백그라운드 데몬 가동")
 
     args = parser.parse_args()
+
+    # 단발성 실행 모드 (--closing, --intraday, 인자 없는 기본 실행): 휴장일 가드 점검
+    if not args.daemon:
+        target_mode = "closing" if args.closing else ("intraday" if args.intraday else "auto")
+        if target_mode == "auto":
+            now_check = datetime.datetime.now()
+            if datetime.time(9, 0) <= now_check.time() < datetime.time(15, 30):
+                target_mode = "intraday"
+            else:
+                target_mode = "closing"
+
+        if not is_market_open_today(mode=target_mode):
+            today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+            print(f"ℹ️ [휴장일 감지] 오늘({today_str})은 주식시장 휴장일이므로 작업을 건너뜁니다.")
+            sys.exit(0)
 
     if args.intraday:
         run_intraday_mode()
