@@ -77,6 +77,8 @@ TARGET_ETFS = [
     {"code": "251340", "name": "KODEX 코스닥인버스", "group": "KOSDAQ 150 인버스", "market": "KOSDAQ", "type": "인버스"},
     {"code": "250780", "name": "TIGER 코스닥인버스", "group": "KOSDAQ 150 인버스", "market": "KOSDAQ", "type": "인버스"},
 ]
+ETF_MAP: Dict[str, Dict[str, Any]] = {e["code"]: e for e in TARGET_ETFS}
+
 
 
 # ==============================================================================
@@ -359,19 +361,35 @@ def fetch_etf_ohlcv(code: str, count: int = 300, vol_mult: float = 1.0) -> Optio
         df["Vol_MA40"] = df["거래량"].ewm(span=40, min_periods=20, adjust=False).mean()
         df["MA40_Slope5"] = ((df["MA40"] - df["MA40"].shift(5)) / df["MA40"].shift(5)) * 100.0
         df["MA40_Disparity"] = (df["종가"] / df["MA40"]) * 100.0
+        df["EMA40_2Day_Below"] = (df["종가"].shift(1) < df["MA40"].shift(1)) & (df["종가"] < df["MA40"])
 
-        return calculate_indicators_and_signals(df, vol_mult=vol_mult)
+        return calculate_indicators_and_signals(df, vol_mult=vol_mult, code=code)
     except Exception as e:
         print(f"⚠️ [{code}] 시세 수집 오류: {e}")
         return None
 
 
-def calculate_indicators_and_signals(df: pd.DataFrame, vol_mult: float = 1.0) -> pd.DataFrame:
+def calculate_indicators_and_signals(df: pd.DataFrame, vol_mult: float = 1.0, code: str = "") -> pd.DataFrame:
     """
-    6개 보조 시그널, 40EMA 조기경고, 트렌드(+) 시그널 및 EMA40 필터 상태 판정 단일화
+    6개 보조 시그널, 40EMA 조기경고, 트렌드(+) 시그널 및 EMA40_Filter(10년 통계 기반 등급) 판정 단일화
+    - 2-1 지표 연산부: MA40_Slope5(5일 기울기 %), MA40_Disparity(이격도 %), EMA40_2Day_Below(2일 연속 이탈)
+    - 2-2 매매신호 필터링: KOSPI 정방향, KOSDAQ 정방향, 인버스 헤지 종목별 10년 검증 등급 부여
     - vol_mult > 1.0일 경우 당일(마지막 행) 장중 예상 거래량 판정 병행
     """
     n = len(df)
+
+    if "MA40" not in df.columns:
+        df["MA40"] = df["종가"].ewm(span=40, min_periods=20, adjust=False).mean()
+    if "Vol_MA40" not in df.columns:
+        df["Vol_MA40"] = df["거래량"].ewm(span=40, min_periods=20, adjust=False).mean()
+    df["MA40_Slope5"] = ((df["MA40"] - df["MA40"].shift(5)) / df["MA40"].shift(5)) * 100.0
+    df["MA40_Disparity"] = (df["종가"] / df["MA40"]) * 100.0
+    df["EMA40_2Day_Below"] = (df["종가"].shift(1) < df["MA40"].shift(1)) & (df["종가"] < df["MA40"])
+
+    etf_meta = ETF_MAP.get(code, {})
+    market = etf_meta.get("market", "")
+    etf_type = etf_meta.get("type", "")
+
     sig1_40ma, sig2_gap, sig3_gap_close, sig4_high, sig5_low = [], [], [], [], []
     ema40_early_alerts = []
 
@@ -495,10 +513,15 @@ def calculate_indicators_and_signals(df: pd.DataFrame, vol_mult: float = 1.0) ->
 
             market_trends.append(sig_label)
             if "하락트렌드 +" in sig_label:
-                if slope <= -EMA40_SLOPE_THRESHOLD:
-                    ema40_filter_tags.append("✅40EMA하향확정")
+                if etf_type == "정방향":
+                    if slope <= -EMA40_SLOPE_THRESHOLD:
+                        ema40_filter_tags.append("✅40EMA하향확정")
+                    else:
+                        ema40_filter_tags.append("⚠️40EMA평탄(휩소주의)")
+                elif etf_type == "인버스":
+                    ema40_filter_tags.append("✅인버스하향(정방향우호)")
                 else:
-                    ema40_filter_tags.append("⚠️40EMA평탄(휩소주의)")
+                    ema40_filter_tags.append("✅하향트렌드확정")
             else:
                 ema40_filter_tags.append("-")
 
@@ -510,14 +533,43 @@ def calculate_indicators_and_signals(df: pd.DataFrame, vol_mult: float = 1.0) ->
 
             market_trends.append(sig_label)
             if "상승트렌드 +" in sig_label:
-                if abs(slope) < EMA40_SLOPE_THRESHOLD:
-                    ema40_filter_tags.append("⚠️40EMA평탄(휩소주의)")
-                elif disp > EMA40_OVERHEAT_DISPARITY:
-                    ema40_filter_tags.append(f"⚠️단기과열(이격{disp:.1f}%)")
-                elif slope >= EMA40_SLOPE_THRESHOLD:
-                    ema40_filter_tags.append("✅40EMA상향확정")
+                # 10년 백테스트 기반 필터 등급 부여
+                if etf_type == "정방향":
+                    if market == "KOSPI":
+                        # KOSPI 정방향: Slope >= +0.15% & Disparity <= 115.0%
+                        if slope >= EMA40_SLOPE_THRESHOLD and disp <= 115.0:
+                            ema40_filter_tags.append("✅40EMA상향확정 (정방향 매수 승인)")
+                        elif disp > 115.0:
+                            ema40_filter_tags.append("⚠️단기과열 (추격 매수 금지)")
+                        elif abs(slope) < EMA40_SLOPE_THRESHOLD:
+                            ema40_filter_tags.append("⚠️40EMA평탄(휩소주의)")
+                        else:
+                            ema40_filter_tags.append("⚠️40EMA역배열반등")
+                    elif market == "KOSDAQ":
+                        # KOSDAQ 정방향: Slope >= +0.15% & Disparity <= 104.0% 초입형
+                        if slope >= EMA40_SLOPE_THRESHOLD and disp <= 104.0:
+                            ema40_filter_tags.append("✅40EMA초입확정 (단기 매수 승인)")
+                        elif disp > 108.0:
+                            ema40_filter_tags.append("⚠️고위험과열 (추격 승률 12.5% 이하, 매수 금지)")
+                        elif disp > 104.0:
+                            ema40_filter_tags.append("⚠️초입초과(단기추격주의)")
+                        elif abs(slope) < EMA40_SLOPE_THRESHOLD:
+                            ema40_filter_tags.append("⚠️40EMA평탄(휩소주의)")
+                        else:
+                            ema40_filter_tags.append("⚠️40EMA역배열반등")
+                    else:
+                        if slope >= EMA40_SLOPE_THRESHOLD:
+                            ema40_filter_tags.append("✅40EMA상향확정")
+                        else:
+                            ema40_filter_tags.append("⚠️40EMA평탄(휩소주의)")
+                elif etf_type == "인버스":
+                    # 인버스 헤지 종목 단독 신호 판정 (4종 동조 검증 전 기본 단독 휩소 또는 패닉 바닥)
+                    if disp >= 111.0:
+                        ema40_filter_tags.append("🛑패닉바닥도달 (인버스 전량 익절 및 추격 금지)")
+                    else:
+                        ema40_filter_tags.append("⚠️단독휩소주의 (진입 금지)")
                 else:
-                    ema40_filter_tags.append("⚠️40EMA역배열반등")
+                    ema40_filter_tags.append("✅상승신호확인")
             else:
                 ema40_filter_tags.append("-")
         else:
@@ -526,7 +578,9 @@ def calculate_indicators_and_signals(df: pd.DataFrame, vol_mult: float = 1.0) ->
 
     df["시장트렌드_시그널"] = market_trends
     df["EMA40_필터판정"] = ema40_filter_tags
+    df["EMA40_Filter"] = ema40_filter_tags
     return df
+
 
 
 
@@ -660,8 +714,14 @@ def build_intraday_report(trigger_label: str = "수동 조회", include_ai: bool
         vol_pct = (r0["거래량"] / r0["Vol_MA40"]) * 100.0 if r0["Vol_MA40"] > 0 else 0.0
 
         sig = r0["시장트렌드_시그널"]
+        f_tag = r0.get("EMA40_Filter") or r0.get("EMA40_필터판정", "-")
         if code in core_codes or sig not in ("해당없음", "데이터 부족"):
-            sig_badge = f"\n  └ 🚨 <b>시그널: {html.escape(sig)}</b>" if sig not in ("해당없음", "데이터 부족") else ""
+            sig_badge = ""
+            if sig not in ("해당없음", "데이터 부족"):
+                sig_badge = f"\n  └ 🚨 <b>시그널: {html.escape(sig)}</b> | <b>[{html.escape(f_tag)}]</b>"
+            elif f_tag and f_tag != "-":
+                sig_badge = f"\n  └ 📌 <b>필터: [{html.escape(f_tag)}]</b>"
+
             lines.append(
                 f"• <b>{item['name']}</b>: <b>{int(r0['종가']):,}원</b> ({chg_1d:+.2f}%)\n"
                 f"  └ 5일 {chg_5d:+.1f}% | 20일 {chg_20d:+.1f}% | 40MA {int(r0['MA40']):,}원\n"
@@ -670,32 +730,62 @@ def build_intraday_report(trigger_label: str = "수동 조회", include_ai: bool
 
     lines.append("\n🧭 <b>[3. 자동매매 3-트랙 실시간 대응 지침]</b>")
 
-    # Track 1: KOSPI 정방향
+    # 4종 동조 검증 (KOSPI 정방향 2종 & 인버스 2종 40EMA 동시 교차 상태)
+    r_k200_tiger = dfs["102110"].iloc[-1]
+    r_kinv_tiger = dfs["123310"].iloc[-1]
+    kospi_long_down = (r_k200["종가"] < r_k200["MA40"]) and (r_k200_tiger["종가"] < r_k200_tiger["MA40"])
+    kospi_inv_up = (r_kinv["종가"] > r_kinv["MA40"]) and (r_kinv_tiger["종가"] > r_kinv_tiger["MA40"])
+    is_kospi_cross_down = kospi_long_down and kospi_inv_up
+
+    # Track 1: KOSPI 정방향 (069500 / 102110)
     k_two_day_below = (dfs["069500"].iloc[-2]["종가"] < dfs["069500"].iloc[-2]["MA40"]) and (r_k200["종가"] < r_k200["MA40"])
-    if k_two_day_below:
-        lines.append(f"• <b>KOSPI 정방향:</b> ⚪ 현금 관망 (40EMA {int(r_k200['MA40']):,}원 회복 대기)")
-    elif r_k200["MA40_Disparity"] >= 120.0:
-        lines.append(f"• <b>KOSPI 정방향:</b> 💰 과열권(이격 {r_k200['MA40_Disparity']:.1f}%) → 50% 분할익절 구간")
+    if k_two_day_below or r_k200["종가"] < r_k200["MA40"]:
+        lines.append(f"• <b>KOSPI 정방향:</b> ⚪ <b>100% 현금 관망</b> (40EMA {int(r_k200['MA40']):,}원 하회, 매수 금지)")
+    elif r_k200["MA40_Disparity"] > 115.0:
+        lines.append(f"• <b>KOSPI 정방향:</b> ⚠️ <b>홀딩 및 분할익절</b> (이격 <b>{r_k200['MA40_Disparity']:.1f}%</b> 과열, 추격 매수 금지)")
+    elif r_k200["MA40_Slope5"] >= EMA40_SLOPE_THRESHOLD and r_k200["MA40_Disparity"] <= 115.0:
+        lines.append(f"• <b>KOSPI 정방향:</b> 🟢 <b>적극 매수 승인</b> (기울기 {r_k200['MA40_Slope5']:+.2f}% / 이격 {r_k200['MA40_Disparity']:.1f}%)")
     else:
-        lines.append(f"• <b>KOSPI 정방향:</b> 🟢 추세 유지 (40EMA {int(r_k200['MA40']):,}원 지지 중)")
+        lines.append(f"• <b>KOSPI 정방향:</b> 🟡 <b>추세 유지 / 홀딩</b> (40EMA {int(r_k200['MA40']):,}원 지지 중)")
 
-    # Track 2: KOSDAQ 정방향
+    # Track 2: KOSDAQ 정방향 (229200 / 232080)
     q_two_day_below = (dfs["229200"].iloc[-2]["종가"] < dfs["229200"].iloc[-2]["MA40"]) and (r_kq150["종가"] < r_kq150["MA40"])
-    if q_two_day_below:
-        lines.append(f"• <b>KOSDAQ 정방향:</b> ⚠️ 40EMA 2일연속 이탈({int(r_kq150['MA40']):,}원) → 전량 청산/진입금지")
-    elif r_kq150["MA40_Disparity"] >= 109.0:
-        lines.append(f"• <b>KOSDAQ 정방향:</b> 💰 과열 상투권(이격 {r_kq150['MA40_Disparity']:.1f}%) → 전량 익절 구간")
+    if q_two_day_below or r_kq150["종가"] < r_kq150["MA40"]:
+        lines.append(f"• <b>KOSDAQ 정방향:</b> ⚪ <b>100% 현금 관망 / 손절</b> (40EMA {int(r_kq150['MA40']):,}원 하회, 진입 절대 금지)")
+    elif r_kq150["MA40_Disparity"] > 108.0:
+        lines.append(f"• <b>KOSDAQ 정방향:</b> ⚠️ <b>전량 익절 / 신규 금지</b> (고위험 과열 이격 <b>{r_kq150['MA40_Disparity']:.1f}%</b>, 추격 승률 12.5% 이하)")
+    elif r_kq150["MA40_Slope5"] >= EMA40_SLOPE_THRESHOLD and r_kq150["MA40_Disparity"] <= 104.0:
+        lines.append(f"• <b>KOSDAQ 정방향:</b> 🟢 <b>단기 매수 승인</b> (초입형 이격 {r_kq150['MA40_Disparity']:.1f}% / 20일 스윙 목표)")
     else:
-        lines.append(f"• <b>KOSDAQ 정방향:</b> 이격 {r_kq150['MA40_Disparity']:.1f}% (초입 매수 기준 ≤104.0%)")
+        lines.append(f"• <b>KOSDAQ 정방향:</b> 🟡 <b>신규 보류 / 관망</b> (이격 {r_kq150['MA40_Disparity']:.1f}% 초입 기준 초과)")
 
-    # Track 3: KOSPI 인버스
+    # Track 3: KOSPI 인버스 (114800 / 123310)
     if r_k200["MA40_Disparity"] <= 88.5 or r_kinv["MA40_Disparity"] >= 111.0:
         lines.append(
-            f"• <b>KOSPI 인버스:</b> 🎯 패닉 과매도 도달(K200 이격 {r_k200['MA40_Disparity']:.1f}% / 인버스 {r_kinv['MA40_Disparity']:.1f}%) "
-            f"→ <b>보유분 익절 및 신규 추격 금지</b>"
+            f"• <b>KOSPI 인버스:</b> 🛑 <b>패닉 바닥 도달 (인버스 전량 익절 및 추격 금지)</b> "
+            f"(지수 이격 <b>{r_k200['MA40_Disparity']:.1f}%</b> / 인버스 이격 <b>{r_kinv['MA40_Disparity']:.1f}%</b>)"
+        )
+    elif is_kospi_cross_down and r_kinv["MA40_Disparity"] <= 105.0:
+        lines.append(
+            f"• <b>KOSPI 인버스:</b> 🎯 <b>헤지 매수 승인 (인버스 폭락 초입)</b> "
+            f"(KOSPI 4대 교차 하락 동조 & 인버스 이격 <b>{r_kinv['MA40_Disparity']:.1f}%</b>)"
         )
     else:
-        lines.append(f"• <b>KOSPI 인버스:</b> 인버스 이격 {r_kinv['MA40_Disparity']:.1f}% (4대교차 하락 초입만 진입)")
+        concur_msg = "4대교차 미동조" if not is_kospi_cross_down else f"이격 {r_kinv['MA40_Disparity']:.1f}% 과열"
+        lines.append(f"• <b>KOSPI 인버스:</b> ⚪ <b>진입 금지 / 단독 휩소 주의</b> ({concur_msg})")
+
+    # 종합 포지션 결론
+    is_all_long_down = (r_k200["종가"] < r_k200["MA40"]) and (r_kq150["종가"] < r_kq150["MA40"])
+    is_inv_overheat_or_panic = (r_k200["MA40_Disparity"] <= 88.5) or (r_kinv["MA40_Disparity"] >= 105.0)
+    if is_all_long_down and (not is_kospi_cross_down or is_inv_overheat_or_panic):
+        lines.append("\n🛡️ <b>[종합 포지션 결론]</b> <b>100% 현금 관망 유지</b> (정방향 하락세 + 인버스 과열/미동조 리스크 회피)")
+    elif r_k200["MA40_Slope5"] >= EMA40_SLOPE_THRESHOLD and r_k200["MA40_Disparity"] <= 115.0 and not is_kospi_cross_down:
+        lines.append("\n🚀 <b>[종합 포지션 결론]</b> <b>KOSPI 정방향 적극 공략</b> (40EMA 상향확정 & 3트랙 매수 승인)")
+    elif is_kospi_cross_down and r_kinv["MA40_Disparity"] <= 105.0:
+        lines.append("\n📉 <b>[종합 포지션 결론]</b> <b>KOSPI 인버스 헤지 가동</b> (4대 교차 하락 확인 & 단기 20일 헤지)")
+    else:
+        lines.append("\n⚖️ <b>[종합 포지션 결론]</b> <b>보수적 관망 / 기존 보유분 관리</b> (원칙 외 무리한 추격 매수 금지)")
+
 
     base_report = "\n".join(lines)
     if include_ai:
@@ -895,7 +985,8 @@ def create_notion_etf_report_page(start_3y: pd.Timestamp, latest_date: pd.Timest
 
     if not df_recent_sigs.empty:
         for _, r in df_recent_sigs.iterrows():
-            line_txt = f"• {r['date_str']} | {r['name']} | {r['signal']} | 종가 {r['close']:,}원 | {r['ema40_filter']} (이격 {r['disparity']:.1f}%, 기울기 {r['slope']:+.2f}%)"
+            f_tag = r.get("EMA40_Filter") or r.get("ema40_filter", "-")
+            line_txt = f"• {r['date_str']} | {r['name']} | {r['signal']} | 종가 {r['close']:,}원 | [{f_tag}] (이격 {r['disparity']:.1f}%, 기울기 {r['slope']:+.2f}%)"
             blocks.append({
                 "object": "block",
                 "type": "bulleted_list_item",
@@ -971,7 +1062,7 @@ def create_notion_etf_report_page(start_3y: pd.Timestamp, latest_date: pd.Timest
             down_cnt = len(df_sub[df_sub["signal"] == "하락트렌드 +"])
             header_line = f"🔹 {name} (총 {len(df_sub)}회 : 상승+ {up_cnt}회 / 하락+ {down_cnt}회)"
             lines = [
-                f"  • {r['date_str']} | {r['name']} | {r['signal']} | 종가 {r['close']:,}원 | {r['ema40_filter']}"
+                f"  • {r['date_str']} | {r['name']} | {r['signal']} | 종가 {r['close']:,}원 | [{r.get('EMA40_Filter') or r.get('ema40_filter', '-')}] (이격 {r['disparity']:.1f}%, 기울기 {r['slope']:+.2f}%)"
                 for _, r in df_sub.iterrows()
             ]
             blocks.extend(split_lines_to_notion_paragraphs(header_line, lines))
@@ -981,6 +1072,7 @@ def create_notion_etf_report_page(start_3y: pd.Timestamp, latest_date: pd.Timest
                 "type": "paragraph",
                 "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"🔹 {name}: 최근 {ANALYSIS_YEARS}년 내 시그널 없음"}}]}
             })
+
 
     url = "https://api.notion.com/v1/pages"
     first_chunk = blocks[:80]
@@ -1008,8 +1100,8 @@ def create_notion_etf_report_page(start_3y: pd.Timestamp, latest_date: pd.Timest
         return None
 
 
-def build_compact_telegram_briefing(latest_date: pd.Timestamp, daily_market_eval: List[Dict[str, Any]], turnaround_signals: List[Dict[str, Any]], cross_signals: List[Dict[str, Any]], dual_signals: List[Dict[str, Any]], df_records: pd.DataFrame, notion_url: Optional[str]) -> str:
-    """중요한 메시지를 중심으로 한눈에 들어오도록 요약한 장마감 텔레그램 브리핑 생성"""
+def build_compact_telegram_briefing(latest_date: pd.Timestamp, daily_market_eval: List[Dict[str, Any]], turnaround_signals: List[Dict[str, Any]], cross_signals: List[Dict[str, Any]], dual_signals: List[Dict[str, Any]], df_records: pd.DataFrame, notion_url: Optional[str], analyzed_dfs: Optional[Dict[str, pd.DataFrame]] = None) -> str:
+    """중요한 메시지를 중심으로 한눈에 들어오도록 요약한 장마감 텔레그램 브리핑 생성 (3-트랙 실전 대응 지침 포함)"""
     latest_str = latest_date.strftime("%Y-%m-%d")
     today_eval = daily_market_eval[0] if daily_market_eval else None
 
@@ -1041,9 +1133,10 @@ def build_compact_telegram_briefing(latest_date: pd.Timestamp, daily_market_eval
 
     if not today_sigs.empty:
         for _, r in today_sigs.iterrows():
+            f_tag = r.get("EMA40_Filter") or r.get("ema40_filter", "-")
             lines.append(
                 f"• <b>{html.escape(r['name'])}</b>: {html.escape(r['signal'])} "
-                f"({r['close']:,}원 | {html.escape(r['ema40_filter'])})"
+                f"({r['close']:,}원 | [{html.escape(f_tag)}])"
             )
     else:
         lines.append("• 당일 신규 트렌드(+) 발생 종목 없음")
@@ -1058,7 +1151,64 @@ def build_compact_telegram_briefing(latest_date: pd.Timestamp, daily_market_eval
             m_data = today_eval["markets"][mkt]
             lines.append(f"• <b>{mkt}</b>: {html.escape(m_data['status'])}")
 
-    lines.append("\n🧭 <b>[3. 최근 주요 변곡점 이력]</b>")
+    # 3-트랙 실전 대응 지침 (40EMA 기울기/이격도/4종 동조 반영)
+    if analyzed_dfs and "069500" in analyzed_dfs and "114800" in analyzed_dfs:
+        r_k200 = analyzed_dfs["069500"].iloc[-1]
+        r_k200_tiger = analyzed_dfs["102110"].iloc[-1] if "102110" in analyzed_dfs else r_k200
+        r_kinv = analyzed_dfs["114800"].iloc[-1]
+        r_kinv_tiger = analyzed_dfs["123310"].iloc[-1] if "123310" in analyzed_dfs else r_kinv
+        r_kq150 = analyzed_dfs["229200"].iloc[-1] if "229200" in analyzed_dfs else None
+
+        k_two_day = (len(analyzed_dfs["069500"]) >= 2 and analyzed_dfs["069500"].iloc[-2]["종가"] < analyzed_dfs["069500"].iloc[-2]["MA40"]) and (r_k200["종가"] < r_k200["MA40"])
+        k_long_down = (r_k200["종가"] < r_k200["MA40"]) and (r_k200_tiger["종가"] < r_k200_tiger["MA40"])
+        k_inv_up = (r_kinv["종가"] > r_kinv["MA40"]) and (r_kinv_tiger["종가"] > r_kinv_tiger["MA40"])
+        is_cross_down = k_long_down and k_inv_up
+
+        lines.append("\n🧭 <b>[3. 자동매매 3-트랙 실전 대응 지침]</b>")
+        # Track 1
+        if k_two_day or r_k200["종가"] < r_k200["MA40"]:
+            lines.append(f"• <b>KOSPI 정방향:</b> ⚪ <b>100% 현금 관망</b> (40EMA {int(r_k200['MA40']):,}원 하회, 매수 금지)")
+        elif r_k200["MA40_Disparity"] > 115.0:
+            lines.append(f"• <b>KOSPI 정방향:</b> ⚠️ <b>홀딩 및 분할익절</b> (이격 {r_k200['MA40_Disparity']:.1f}% 과열, 추격 금지)")
+        elif r_k200["MA40_Slope5"] >= EMA40_SLOPE_THRESHOLD and r_k200["MA40_Disparity"] <= 115.0:
+            lines.append(f"• <b>KOSPI 정방향:</b> 🟢 <b>적극 매수 승인</b> (기울기 {r_k200['MA40_Slope5']:+.2f}% / 이격 {r_k200['MA40_Disparity']:.1f}%)")
+        else:
+            lines.append(f"• <b>KOSPI 정방향:</b> 🟡 <b>추세 유지 / 홀딩</b> (40EMA 지지 중)")
+
+        # Track 2
+        if r_kq150 is not None:
+            q_two_day = (len(analyzed_dfs["229200"]) >= 2 and analyzed_dfs["229200"].iloc[-2]["종가"] < analyzed_dfs["229200"].iloc[-2]["MA40"]) and (r_kq150["종가"] < r_kq150["MA40"])
+            if q_two_day or r_kq150["종가"] < r_kq150["MA40"]:
+                lines.append(f"• <b>KOSDAQ 정방향:</b> ⚪ <b>100% 현금 관망 / 손절</b> (40EMA {int(r_kq150['MA40']):,}원 하회)")
+            elif r_kq150["MA40_Disparity"] > 108.0:
+                lines.append(f"• <b>KOSDAQ 정방향:</b> ⚠️ <b>전량 익절 / 신규 금지</b> (고위험 과열 이격 {r_kq150['MA40_Disparity']:.1f}%)")
+            elif r_kq150["MA40_Slope5"] >= EMA40_SLOPE_THRESHOLD and r_kq150["MA40_Disparity"] <= 104.0:
+                lines.append(f"• <b>KOSDAQ 정방향:</b> 🟢 <b>단기 매수 승인</b> (초입형 이격 {r_kq150['MA40_Disparity']:.1f}% / 20일 스윙)")
+            else:
+                lines.append(f"• <b>KOSDAQ 정방향:</b> 🟡 <b>신규 보류 / 관망</b> (이격 {r_kq150['MA40_Disparity']:.1f}%)")
+
+        # Track 3
+        if r_k200["MA40_Disparity"] <= 88.5 or r_kinv["MA40_Disparity"] >= 111.0:
+            lines.append(f"• <b>KOSPI 인버스:</b> 🛑 <b>패닉 바닥 도달 (인버스 전량 익절 & 추격 매수 금지)</b>")
+        elif is_cross_down and r_kinv["MA40_Disparity"] <= 105.0:
+            lines.append(f"• <b>KOSPI 인버스:</b> 🎯 <b>헤지 매수 승인 (폭락 초입)</b> (4대교차 하락 & 이격 {r_kinv['MA40_Disparity']:.1f}%)")
+        else:
+            concur_msg = "4대교차 미동조" if not is_cross_down else f"이격 {r_kinv['MA40_Disparity']:.1f}% 과열"
+            lines.append(f"• <b>KOSPI 인버스:</b> ⚪ <b>진입 금지 / 단독 휩소 주의</b> ({concur_msg})")
+
+        # 종합 포지션 결론
+        is_all_long_down = (r_k200["종가"] < r_k200["MA40"]) and (r_kq150 is None or r_kq150["종가"] < r_kq150["MA40"])
+        is_inv_overheat_or_panic = (r_k200["MA40_Disparity"] <= 88.5) or (r_kinv["MA40_Disparity"] >= 105.0)
+        if is_all_long_down and (not is_cross_down or is_inv_overheat_or_panic):
+            lines.append("🛡️ <b>[종합 결론]</b> <b>100% 현금 관망 유지</b> (정방향 하락세 + 인버스 과열/미동조 리스크 회피)")
+        elif r_k200["MA40_Slope5"] >= EMA40_SLOPE_THRESHOLD and r_k200["MA40_Disparity"] <= 115.0 and not is_cross_down:
+            lines.append("🚀 <b>[종합 결론]</b> <b>KOSPI 정방향 적극 공략</b> (40EMA 상향확정 & 3트랙 매수 승인)")
+        elif is_cross_down and r_kinv["MA40_Disparity"] <= 105.0:
+            lines.append("📉 <b>[종합 결론]</b> <b>KOSPI 인버스 헤지 가동</b> (4대 교차 하락 확인 & 단기 20일 헤지)")
+        else:
+            lines.append("⚖️ <b>[종합 결론]</b> <b>보수적 관망 / 기존 보유분 관리</b> (원칙 외 무리한 추격 매수 금지)")
+
+    lines.append("\n📜 <b>[4. 최근 주요 변곡점 이력]</b>")
     if turnaround_signals:
         rt = turnaround_signals[0]
         lines.append(f"• <b>최근 턴어라운드:</b> {rt['curr_date']} ({rt['market']} {html.escape(rt['curr_direction'])})")
@@ -1081,6 +1231,7 @@ def build_compact_telegram_briefing(latest_date: pd.Timestamp, daily_market_eval
 
     if notion_url:
         lines.append(f"\n🔗 <a href='{notion_url}'>노션 상세 리포트 열기</a>")
+
 
     return "\n".join(lines)
 
@@ -1172,6 +1323,30 @@ def run_closing_mode() -> None:
 
     cross_signals.sort(key=lambda x: x["date_str"])
     dual_signals.sort(key=lambda x: x["date_str"])
+
+    # 4종 동조 검증 및 인버스 필터 등급 고도화 (KOSPI 4대 교차 하락 동조 & 패닉 바닥 이격도 판정)
+    kospi_down_cross_dates = {c["date_str"] for c in cross_signals if c["market"] == "KOSPI" and "하락" in c["direction"]}
+    k200_df = analyzed_dfs.get("069500")
+    k200_disp_map = {}
+    if k200_df is not None:
+        for _, row in k200_df.iterrows():
+            k200_disp_map[row["dt"].strftime("%Y-%m-%d")] = row["MA40_Disparity"]
+
+    for r in records:
+        if r["type"] == "인버스" and "상승트렌드" in r["signal"]:
+            d_str = r["date_str"]
+            inv_disp = r["disparity"]
+            k200_disp = k200_disp_map.get(d_str, 100.0)
+
+            if k200_disp <= 88.5 or inv_disp >= 111.0:
+                r["ema40_filter"] = "🛑패닉바닥도달 (인버스 전량 익절 및 추격 금지)"
+            elif d_str in kospi_down_cross_dates and inv_disp <= 105.0:
+                r["ema40_filter"] = "🎯인버스폭락초입 (헤지 진입 승인)"
+            else:
+                r["ema40_filter"] = "⚠️단독휩소주의 (진입 금지)"
+        r["EMA40_Filter"] = r["ema40_filter"]
+
+    df_records = pd.DataFrame(records)
 
     turnaround_signals = []
     for mkt in ["KOSPI", "KOSDAQ"]:
@@ -1430,7 +1605,7 @@ def run_closing_mode() -> None:
     notion_url = create_notion_etf_report_page(start_10y, latest_date, daily_market_eval, turnaround_signals, cross_signals, dual_signals, df_records, TARGET_ETFS)
 
     # 텔레그램 최종 요약 브리핑 발송
-    briefing_text = build_compact_telegram_briefing(latest_date, daily_market_eval, turnaround_signals, cross_signals, dual_signals, df_records, notion_url)
+    briefing_text = build_compact_telegram_briefing(latest_date, daily_market_eval, turnaround_signals, cross_signals, dual_signals, df_records, notion_url, analyzed_dfs=analyzed_dfs)
     print("\n[텔레그램 브리핑 메시지]")
     print(briefing_text)
     send_telegram_message(briefing_text)
@@ -1626,12 +1801,13 @@ if __name__ == "__main__":
             else:
                 target_mode = "closing"
 
-        # --ai 테스트를 위해 명시적으로 --intraday --ai 또는 --ai 옵션을 준 경우에는 휴장일이라도 최근 종가 기준으로 발송 진행
-        if not (args.ai and (args.intraday or not args.closing)):
+        # CLI에서 명시적으로 --intraday 또는 --ai 옵션을 준 경우에는 휴장일이라도 최근 종가 기준으로 발송 및 테스트 진행
+        if not (args.intraday or args.ai):
             if not is_market_open_today(mode=target_mode):
                 today_str = datetime.datetime.now().strftime("%Y-%m-%d")
                 print(f"ℹ️ [휴장일 감지] 오늘({today_str})은 주식시장 휴장일이므로 작업을 건너뜁니다. (테스트 실행은 --force 추가)")
                 sys.exit(0)
+
 
     if args.intraday or (args.ai and not args.closing and not args.daemon):
         run_intraday_mode(include_ai=args.ai)
