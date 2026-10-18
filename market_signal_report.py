@@ -31,13 +31,15 @@ if hasattr(sys.stdout, "reconfigure"):
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(BASE_DIR, ".env"))
+    load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
 except ImportError:
     pass
 
 # 환경변수 로드
 MY_BOT_TOKEN = os.environ.get("MY_BOT_TOKEN", "")
 MY_CHAT_ID = os.environ.get("MY_CHAT_ID", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 NOTION_API_KEY = os.environ.get("NOTION_API_KEY", "")
 NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "")
@@ -527,11 +529,82 @@ def calculate_indicators_and_signals(df: pd.DataFrame, vol_mult: float = 1.0) ->
     return df
 
 
+
+
+def generate_gemini_advice(report_text: str) -> str:
+    """
+    구글 Gemini API(gemini-2.5-flash)를 연동하여 10년 통계 기반 실전 장세 대응 조언을 생성합니다.
+    - 3-트랙 핵심 규칙(KOSPI 정방향, KOSDAQ 정방향, KOSPI 인버스, 100% 현금 관망) 프롬프트 탑재
+    - 응답 텍스트에서 마크다운 볼드(**) 기호 제거 및 html.escape 적용
+    """
+    if not GEMINI_API_KEY:
+        return "⚠️ <b>[Gemini AI 조언 알림]</b> GEMINI_API_KEY가 설정되지 않아 AI 실전 조언을 생성할 수 없습니다."
+
+    try:
+        from google import genai
+        client = genai.Client(api_key=GEMINI_API_KEY)
+
+        prompt = (
+            "당신은 대한민국 ETF 시장의 10년 통계 데이터와 40EMA(지수이동평균) 트렌드 필터링 시스템을 완벽히 마스터한 퀀트 수석 트레이더입니다.\n"
+            "아래 제공된 '8대 ETF 실시간 주가 분석 리포트'를 바탕으로, 당사의 [10년 검증 3-트랙 핵심 규칙]에 엄격히 입각하여 "
+            "개인 투자자가 지금 당장 취해야 할 가장 냉철하고 명확한 실전 포지션 대응 조언을 작성하세요.\n\n"
+            "[10년 검증 3-트랙 핵심 규칙]\n"
+            "① KOSPI 정방향 (069500 KODEX 200, 102110 TIGER 200):\n"
+            "   - 진입: 40EMA 5일 기울기 ≥+0.15% 및 이격도 ≤115% 진입\n"
+            "   - 손절: 40EMA 2일 연속 이탈 시 전량 칼손절 및 현금화\n"
+            "   - 과열: 이격도 ≥120% 시 50% 분할 익절\n"
+            "② KOSDAQ 정방향 (229200 KODEX 코스닥150, 232080 TIGER 코스닥150):\n"
+            "   - 진입: 40EMA 5일 기울기 ≥+0.15% 및 이격도 ≤104% 초입만 20일 단기 스윙 진입\n"
+            "   - 추격 금지: 이격도 108% 초과 시 신규 추격 매수 절대 금지\n"
+            "   - 익절/손절: 이격도 ≥109% 상투권 전량 익절, 40EMA 2일 연속 이탈 시 전량 손절\n"
+            "③ KOSPI 인버스 (114800 KODEX 인버스, 123310 TIGER 인버스):\n"
+            "   - 진입: 4대교차 하락 & 이격도 ≤105% 초입만 20일 진입\n"
+            "   - 패닉 익절: 지수(KOSPI 200) 이격도 ≤88.5% 또는 인버스 이격도 ≥111.0% 패닉 도달 시 즉시 전량 익절 및 추격 매수 절대 금지\n"
+            "④ 정방향 하락세 + 인버스 과열 시:\n"
+            "   - 무리한 포지션 진입을 금지하고 100% 현금 관망 유지\n\n"
+            "[실시간 리포트 데이터]\n"
+            f"{report_text}\n\n"
+            "[작성 지침]\n"
+            "- 서론/인사말 없이 직관적인 불릿포인트 요약 형태로 작성할 것\n"
+            "- 1. 시장 국면 총평 (현재 장세 판정 및 40EMA 방향성 요약)\n"
+            "- 2. 트랙별 실전 포지션 대응 지침 (KOSPI 정방향, KOSDAQ 정방향, KOSPI 인버스별 매수/보유/손절/익절/관망 명시)\n"
+            "- 3. 오늘의 핵심 주의사항 (추격 매수 금지 구간, 손절 기준가 등)\n"
+            "- 분량은 전체 텔레그램 메시지 길이 제한을 고려하여 핵심 위주로 공백 포함 500~800자 내외로 간결하게 작성할 것\n"
+            "- 마크다운 굵은 글씨(**)는 일절 사용하지 말 것\n"
+        )
+
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+        except Exception as model_err:
+            err_msg = str(model_err)
+            if "gemini-2.5-flash" in model_name and ("404" in err_msg or "not available" in err_msg.lower()):
+                response = client.models.generate_content(
+                    model="gemini-3.8-flash",
+                    contents=prompt,
+                )
+            else:
+                raise model_err
+
+        raw_advice = response.text or ""
+        clean_advice = raw_advice.replace("**", "").strip()
+        escaped_advice = html.escape(clean_advice)
+
+        header = "🤖 <b>[Gemini AI 10년 통계 기반 실전 대응 조언]</b>"
+        return f"{header}\n\n{escaped_advice}"
+
+    except Exception as e:
+        return f"⚠️ <b>[Gemini AI 실전 조언 생성 실패]</b> {html.escape(str(e))}"
+
+
 # ==============================================================================
 # 4. 장중 실시간 브리핑 모드 (run_intraday_mode)
 # ==============================================================================
-def build_intraday_report(trigger_label: str = "장중 실시간 브리핑") -> str:
-    """현재 주가 분석 및 자동매매 3-트랙 대응 지침 메시지 작성"""
+def build_intraday_report(trigger_label: str = "수동 조회", include_ai: bool = False) -> str:
+    """현재 주가 분석 및 자동매매 3-트랙 대응 지침 메시지 작성 (include_ai=True 시 Gemini AI 조언 결합)"""
     now_dt = datetime.datetime.now()
     now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
     vol_mult = get_intraday_volume_multiplier(now_dt)
@@ -624,21 +697,32 @@ def build_intraday_report(trigger_label: str = "장중 실시간 브리핑") -> 
     else:
         lines.append(f"• <b>KOSPI 인버스:</b> 인버스 이격 {r_kinv['MA40_Disparity']:.1f}% (4대교차 하락 초입만 진입)")
 
-    return "\n".join(lines)
+    base_report = "\n".join(lines)
+    if include_ai:
+        advice = generate_gemini_advice(base_report)
+        full_report = f"{base_report}\n\n━━━━━━━━━━━━━━━━━━━━━\n{advice}"
+        if len(full_report) > 3900:
+            full_report = full_report[:3850] + "\n\n...(메시지 길이 제한으로 축약됨)"
+        return full_report
+
+    return base_report
 
 
-def run_intraday_mode() -> None:
-    """장중 모드 진입점: 1회 분석 리포트 생성, 콘솔 출력 및 텔레그램 발송"""
+def run_intraday_mode(include_ai: bool = False) -> None:
+    """장중 모드 진입점: 1회 분석 리포트 생성, 콘솔 출력 및 텔레그램 발송 (include_ai 옵션 지원)"""
     print("=" * 65)
-    print("⚡ [장중 실시간 브리핑 모드 실행]")
+    mode_title = "⚡ [장중 실시간 브리핑 모드 실행 (Gemini AI 분석 포함)]" if include_ai else "⚡ [장중 실시간 브리핑 모드 실행]"
+    print(mode_title)
     print("=" * 65)
-    report_msg = build_intraday_report(trigger_label="장중 실시간 브리핑")
+    trigger_title = "장중 실시간 AI 브리핑" if include_ai else "장중 실시간 브리핑"
+    report_msg = build_intraday_report(trigger_label=trigger_title, include_ai=include_ai)
     print(report_msg)
     ok = send_telegram_message(report_msg)
     if ok:
         print("\n✅ 텔레그램 발송 완료!")
     else:
         print("\n⚠️ 텔레그램 발송 실패 (콘솔 출력 완료)")
+
 
 
 # ==============================================================================
@@ -1414,7 +1498,7 @@ def run_daemon_mode() -> None:
     print("=" * 65)
     print("🤖 [장중 통합 봇 데몬 가동 시작]")
     print(f"   • 평일 자동 브리핑 시각: {', '.join(SCHEDULE_TIMES)}")
-    print("   • 실시간 대화형 명령어: /분석, /포지션, /상태")
+    print("   • 실시간 대화형 명령어: /분석, /ai분석, /포지션, /상태")
     print("=" * 65)
 
     offset = get_initial_update_offset()
@@ -1423,7 +1507,7 @@ def run_daemon_mode() -> None:
     send_telegram_message(
         "🟢 <b>[통합 마켓시그널 봇 데몬 가동]</b>\n"
         f"• <b>정기 자동 브리핑:</b> 평일 {', '.join(SCHEDULE_TIMES)}\n"
-        "• <b>명령어 안내:</b> <code>/분석</code> (실시간 시황), <code>/포지션</code> (보유손익)"
+        "• <b>명령어 안내:</b> <code>/분석</code>, <code>/ai분석</code>, <code>/포지션</code>, <code>/상태</code>"
     )
 
     while True:
@@ -1467,7 +1551,18 @@ def run_daemon_mode() -> None:
                         cmd = text.split()[0].lower()
                         print(f"📩 [명령어 수신] {now_dt.strftime('%H:%M:%S')} -> {text}")
 
-                        if cmd in ("/분석", "분석", "/report", "/시황"):
+                        if cmd in ("/ai분석", "ai분석", "/ai", "ai"):
+                            send_telegram_message(
+                                "🤖 <i>8대 ETF 실시간 지표를 수집하여 Gemini AI 장세 대응 조언을 생성 중입니다...</i>",
+                                chat_id
+                            )
+                            if not is_market_open_today(mode="intraday"):
+                                notice = f"ℹ️ <b>[휴장일 안내]</b> 오늘({today_str})은 주식시장 휴장일입니다.\n(최근 거래일 종가 기준으로 AI 분석을 제공합니다.)\n\n"
+                                reply = notice + build_intraday_report(trigger_label="실시간 /ai분석 요청 (휴장일)", include_ai=True)
+                            else:
+                                reply = build_intraday_report(trigger_label="실시간 /ai분석 요청", include_ai=True)
+                            send_telegram_message(reply, chat_id)
+                        elif cmd in ("/분석", "분석", "/report", "/시황"):
                             if not is_market_open_today(mode="intraday"):
                                 notice = f"ℹ️ <b>[휴장일 안내]</b> 오늘({today_str})은 주식시장 휴장일입니다.\n(최근 거래일 종가 기준으로 분석을 제공합니다.)\n\n"
                                 reply = notice + build_intraday_report(trigger_label="실시간 /분석 요청 (휴장일)")
@@ -1492,6 +1587,7 @@ def run_daemon_mode() -> None:
                                 f"• <b>금일 발송 완료:</b> {sent_list}\n\n"
                                 "💡 <b>[사용 가능한 명령어]</b>\n"
                                 "• <code>/분석</code> : 8대 ETF 실시간 시세·40EMA·3트랙 지침 즉시 조회\n"
+                                "• <code>/ai분석</code> : Gemini AI 10년 통계 기반 실전 대응 조언 포함 조회\n"
                                 "• <code>/포지션</code> : 보유 슬롯 실시간 평가 손익 조회\n"
                                 "• <code>/상태</code> : 봇 정상 동작 여부 확인"
                             )
@@ -1515,11 +1611,13 @@ if __name__ == "__main__":
     parser.add_argument("--intraday", action="store_true", help="장중 실시간 브리핑 1회 발송 후 종료")
     parser.add_argument("--closing", action="store_true", help="장마감 10년 종합 분석 실행 (엑셀/노션/텔레그램/Git 백업)")
     parser.add_argument("--daemon", action="store_true", help="장중 정기 브리핑 및 텔레그램 명령어 응답 백그라운드 데몬 가동")
+    parser.add_argument("--ai", action="store_true", help="Gemini AI 10년 통계 기반 실전 대응 조언 포함")
+    parser.add_argument("--force", action="store_true", help="휴장일 검사를 건너뛰고 강제 실행")
 
     args = parser.parse_args()
 
     # 단발성 실행 모드 (--closing, --intraday, 인자 없는 기본 실행): 휴장일 가드 점검
-    if not args.daemon:
+    if not args.daemon and not args.force:
         target_mode = "closing" if args.closing else ("intraday" if args.intraday else "auto")
         if target_mode == "auto":
             now_check = datetime.datetime.now()
@@ -1528,13 +1626,15 @@ if __name__ == "__main__":
             else:
                 target_mode = "closing"
 
-        if not is_market_open_today(mode=target_mode):
-            today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-            print(f"ℹ️ [휴장일 감지] 오늘({today_str})은 주식시장 휴장일이므로 작업을 건너뜁니다.")
-            sys.exit(0)
+        # --ai 테스트를 위해 명시적으로 --intraday --ai 또는 --ai 옵션을 준 경우에는 휴장일이라도 최근 종가 기준으로 발송 진행
+        if not (args.ai and (args.intraday or not args.closing)):
+            if not is_market_open_today(mode=target_mode):
+                today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                print(f"ℹ️ [휴장일 감지] 오늘({today_str})은 주식시장 휴장일이므로 작업을 건너뜁니다. (테스트 실행은 --force 추가)")
+                sys.exit(0)
 
-    if args.intraday:
-        run_intraday_mode()
+    if args.intraday or (args.ai and not args.closing and not args.daemon):
+        run_intraday_mode(include_ai=args.ai)
     elif args.closing:
         run_closing_mode()
     elif args.daemon:
@@ -1547,7 +1647,8 @@ if __name__ == "__main__":
 
         if is_weekday and is_market_hours:
             print(f"ℹ️ [스마트 분기] 평일 정규장 시간대({now.strftime('%H:%M')}) 감지 -> 장중 실시간 모드(--intraday) 자동 실행")
-            run_intraday_mode()
+            run_intraday_mode(include_ai=args.ai)
         else:
             print(f"ℹ️ [스마트 분기] 정규장 마감 시간대({now.strftime('%H:%M')}) 감지 -> 장마감 종합 분석 모드(--closing) 자동 실행")
             run_closing_mode()
+
