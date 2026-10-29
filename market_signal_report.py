@@ -45,6 +45,20 @@ NOTION_API_KEY = os.environ.get("NOTION_API_KEY", "")
 NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "")
 NOTION_VERSION = "2022-06-28"
 
+# 구글 드라이브 환경변수
+GDRIVE_SERVICE_ACCOUNT_FILE = os.environ.get("GDRIVE_SERVICE_ACCOUNT_FILE", "service_account.json")
+GDRIVE_SERVICE_ACCOUNT_JSON = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON", "")
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")
+
+# 구글 드라이브 클라이언트 라이브러리 선택적 로드
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build as gdrive_build
+    from googleapiclient.http import MediaFileUpload
+    GDRIVE_AVAILABLE = True
+except ImportError:
+    GDRIVE_AVAILABLE = False
+
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_API_KEY}",
     "Content-Type": "application/json",
@@ -210,6 +224,87 @@ def send_telegram_message(text: str, chat_id: str = MY_CHAT_ID) -> bool:
     except Exception as e:
         print(f"⚠️ 텔레그램 통신 오류: {e}")
         return False
+
+
+def upload_excel_to_gdrive(file_path: str, custom_filename: Optional[str] = None) -> Optional[str]:
+    """
+    Google Cloud Service Account를 이용하여 분석 엑셀 보고서를 구글 드라이브에 업로드하고 공유 링크를 반환
+    1. GDRIVE_SERVICE_ACCOUNT_JSON (환경변수 문자열) 또는 GDRIVE_SERVICE_ACCOUNT_FILE (JSON 파일 경로) 확인
+    2. GDRIVE_FOLDER_ID 폴더가 설정되어 있으면 해당 폴더 내로 업로드 (지정 안될 시 루트)
+    3. 링크 열람 권한(anyone reader) 부여
+    4. webViewLink 반환 (실패 시 None 반환 및 안전 예외 처리)
+    """
+    if not GDRIVE_AVAILABLE:
+        print("ℹ️ [구글 드라이브] google-api-python-client 라이브러리 미설치로 드라이브 업로드를 건너뜁니다.")
+        return None
+
+    if not os.path.exists(file_path):
+        print(f"⚠️ [구글 드라이브] 업로드 대상 파일이 존재하지 않습니다: {file_path}")
+        return None
+
+    creds = None
+    if GDRIVE_SERVICE_ACCOUNT_JSON:
+        try:
+            info = json.loads(GDRIVE_SERVICE_ACCOUNT_JSON)
+            creds = service_account.Credentials.from_service_account_info(
+                info, scopes=["https://www.googleapis.com/auth/drive"]
+            )
+        except Exception as e:
+            print(f"⚠️ [구글 드라이브] GDRIVE_SERVICE_ACCOUNT_JSON 파싱 실패: {e}")
+
+    if not creds:
+        sa_file = GDRIVE_SERVICE_ACCOUNT_FILE
+        if not os.path.isabs(sa_file):
+            sa_file = os.path.join(BASE_DIR, sa_file)
+        if os.path.exists(sa_file):
+            try:
+                creds = service_account.Credentials.from_service_account_file(
+                    sa_file, scopes=["https://www.googleapis.com/auth/drive"]
+                )
+            except Exception as e:
+                print(f"⚠️ [구글 드라이브] 서비스 계정 파일 로드 실패 ({sa_file}): {e}")
+
+    if not creds:
+        print("ℹ️ [구글 드라이브] 서비스 계정 인증 정보가 설정되지 않아 드라이브 업로드를 건너뜁니다.")
+        return None
+
+    try:
+        service = gdrive_build("drive", "v3", credentials=creds, cache_discovery=False)
+        filename = custom_filename or os.path.basename(file_path)
+
+        file_metadata: Dict[str, Any] = {"name": filename}
+        if GDRIVE_FOLDER_ID:
+            file_metadata["parents"] = [GDRIVE_FOLDER_ID]
+
+        media = MediaFileUpload(
+            file_path,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            resumable=True
+        )
+
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id, webViewLink, webContentLink"
+        ).execute()
+
+        file_id = file.get("id")
+        web_link = file.get("webViewLink")
+
+        # 링크가 있는 사용자 누구나 열람 가능하도록 권한 추가
+        try:
+            service.permissions().create(
+                fileId=file_id,
+                body={"type": "anyone", "role": "reader"}
+            ).execute()
+        except Exception:
+            pass
+
+        print(f"✅ [구글 드라이브] 엑셀 보고서 업로드 완료: {web_link}")
+        return web_link
+    except Exception as e:
+        print(f"⚠️ [구글 드라이브] 업로드 중 예외 발생: {e}")
+        return None
 
 
 def auto_git_backup(excel_path: str, latest_date_str: str) -> bool:
@@ -1100,7 +1195,7 @@ def create_notion_etf_report_page(start_3y: pd.Timestamp, latest_date: pd.Timest
         return None
 
 
-def build_compact_telegram_briefing(latest_date: pd.Timestamp, daily_market_eval: List[Dict[str, Any]], turnaround_signals: List[Dict[str, Any]], cross_signals: List[Dict[str, Any]], dual_signals: List[Dict[str, Any]], df_records: pd.DataFrame, notion_url: Optional[str], analyzed_dfs: Optional[Dict[str, pd.DataFrame]] = None) -> str:
+def build_compact_telegram_briefing(latest_date: pd.Timestamp, daily_market_eval: List[Dict[str, Any]], turnaround_signals: List[Dict[str, Any]], cross_signals: List[Dict[str, Any]], dual_signals: List[Dict[str, Any]], df_records: pd.DataFrame, notion_url: Optional[str], analyzed_dfs: Optional[Dict[str, pd.DataFrame]] = None, gdrive_url: Optional[str] = None) -> str:
     """중요한 메시지를 중심으로 한눈에 들어오도록 요약한 장마감 텔레그램 브리핑 생성 (3-트랙 실전 대응 지침 포함)"""
     latest_str = latest_date.strftime("%Y-%m-%d")
     today_eval = daily_market_eval[0] if daily_market_eval else None
@@ -1231,6 +1326,8 @@ def build_compact_telegram_briefing(latest_date: pd.Timestamp, daily_market_eval
 
     if notion_url:
         lines.append(f"\n🔗 <a href='{notion_url}'>노션 상세 리포트 열기</a>")
+    if gdrive_url:
+        lines.append(f"📁 <a href='{gdrive_url}'>구글 드라이브 엑셀 보고서</a>")
 
 
     return "\n".join(lines)
@@ -1601,11 +1698,14 @@ def run_closing_mode() -> None:
         excel_path = alt_excel_path
         print(f"\n⚠️ 기존 엑셀 파일 사용 중으로 대체 저장 완료: {excel_path}")
 
+    # 구글 드라이브 엑셀 업로드
+    gdrive_url = upload_excel_to_gdrive(excel_path)
+
     # 노션 페이지 등록
     notion_url = create_notion_etf_report_page(start_10y, latest_date, daily_market_eval, turnaround_signals, cross_signals, dual_signals, df_records, TARGET_ETFS)
 
-    # 텔레그램 최종 요약 브리핑 발송
-    briefing_text = build_compact_telegram_briefing(latest_date, daily_market_eval, turnaround_signals, cross_signals, dual_signals, df_records, notion_url, analyzed_dfs=analyzed_dfs)
+    # 텔레그램 최종 요약 브리핑 발송 (구글 드라이브 링크 포함)
+    briefing_text = build_compact_telegram_briefing(latest_date, daily_market_eval, turnaround_signals, cross_signals, dual_signals, df_records, notion_url, analyzed_dfs=analyzed_dfs, gdrive_url=gdrive_url)
     print("\n[텔레그램 브리핑 메시지]")
     print(briefing_text)
     send_telegram_message(briefing_text)
