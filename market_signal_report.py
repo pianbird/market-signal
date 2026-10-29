@@ -49,10 +49,14 @@ NOTION_VERSION = "2022-06-28"
 GDRIVE_SERVICE_ACCOUNT_FILE = os.environ.get("GDRIVE_SERVICE_ACCOUNT_FILE", "service_account.json")
 GDRIVE_SERVICE_ACCOUNT_JSON = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON", "")
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")
+GDRIVE_CLIENT_ID = os.environ.get("GDRIVE_CLIENT_ID", "")
+GDRIVE_CLIENT_SECRET = os.environ.get("GDRIVE_CLIENT_SECRET", "")
+GDRIVE_REFRESH_TOKEN = os.environ.get("GDRIVE_REFRESH_TOKEN", "")
 
 # 구글 드라이브 클라이언트 라이브러리 선택적 로드
 try:
     from google.oauth2 import service_account
+    from google.oauth2.credentials import Credentials as OAuthCredentials
     from googleapiclient.discovery import build as gdrive_build
     from googleapiclient.http import MediaFileUpload
     GDRIVE_AVAILABLE = True
@@ -243,7 +247,23 @@ def upload_excel_to_gdrive(file_path: str, custom_filename: Optional[str] = None
         return None
 
     creds = None
-    if GDRIVE_SERVICE_ACCOUNT_JSON:
+
+    # 1. OAuth 2.0 Refresh Token 인증 (개인 구글 계정)
+    if GDRIVE_REFRESH_TOKEN and GDRIVE_CLIENT_ID and GDRIVE_CLIENT_SECRET:
+        try:
+            creds = OAuthCredentials(
+                token=None,
+                refresh_token=GDRIVE_REFRESH_TOKEN,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=GDRIVE_CLIENT_ID,
+                client_secret=GDRIVE_CLIENT_SECRET,
+                scopes=["https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive"],
+            )
+        except Exception as e:
+            print(f"⚠️ [구글 드라이브] OAuth 2.0 자격증명 초기화 실패: {e}")
+
+    # 2. Google Cloud Service Account 인증
+    if not creds and GDRIVE_SERVICE_ACCOUNT_JSON:
         try:
             info = json.loads(GDRIVE_SERVICE_ACCOUNT_JSON)
             creds = service_account.Credentials.from_service_account_info(
@@ -265,7 +285,7 @@ def upload_excel_to_gdrive(file_path: str, custom_filename: Optional[str] = None
                 print(f"⚠️ [구글 드라이브] 서비스 계정 파일 로드 실패 ({sa_file}): {e}")
 
     if not creds:
-        print("ℹ️ [구글 드라이브] 서비스 계정 인증 정보가 설정되지 않아 드라이브 업로드를 건너뜁니다.")
+        print("ℹ️ [구글 드라이브] 인증 정보(OAuth 토큰 또는 서비스 계정)가 설정되지 않아 드라이브 업로드를 건너뜁니다.")
         return None
 
     try:

@@ -10,3 +10,7 @@ dist/
 diff.txt
 service_account*.json
 *credentials*.json
+.json
+*.token
+token.json
+get_gdrive_token.py
